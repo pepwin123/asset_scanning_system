@@ -1,5 +1,5 @@
-name: asset_scanning_system
-description: "A new Flutter project."
+name: ispace_asset_scanner
+description: "iSpace Asset Scanner - A professional office property tracking system."
 publish_to: 'none'
 
 version: 1.0.0+1

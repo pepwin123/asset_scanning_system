@@ -1,11 +1,11 @@
 {
-    "name": "asset_scanning_system",
-    "short_name": "asset_scanning_system",
+    "name": "iSpace Asset Scanner",
+    "short_name": "iSpace Scanner",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "iSpace Asset Scanner - A professional office property tracking system.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
