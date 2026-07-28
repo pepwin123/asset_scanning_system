@@ -1,39 +1,39 @@
 class Asset {
   final int? id;
-  final String uniqueCode;
-  final String itemName;
-  final String empId;
-  final String empName;
-  final bool isCompanyProperty;
+  final String assetId;
+  final String employeeId;
+  final String employeeName;
+  final String model;
+  final String serialNumber;
 
   Asset({
     this.id,
-    required this.uniqueCode,
-    required this.itemName,
-    required this.empId,
-    required this.empName,
-    required this.isCompanyProperty,
+    required this.assetId,
+    required this.employeeId,
+    required this.employeeName,
+    required this.model,
+    required this.serialNumber,
   });
 
   Map<String, dynamic> toMap() {
     return {
       'id': id,
-      'unique_code': uniqueCode,
-      'item_name': itemName,
-      'emp_id': empId,
-      'emp_name': empName,
-      'is_company_property': isCompanyProperty ? 1 : 0,
+      'asset_id': assetId,
+      'employee_id': employeeId,
+      'employee_name': employeeName,
+      'model': model,
+      'serial_number': serialNumber,
     };
   }
 
   factory Asset.fromMap(Map<String, dynamic> map) {
     return Asset(
       id: map['id'],
-      uniqueCode: map['unique_code'],
-      itemName: map['item_name'],
-      empId: map['emp_id'],
-      empName: map['emp_name'],
-      isCompanyProperty: map['is_company_property'] == 1,
+      assetId: map['asset_id'] ?? '',
+      employeeId: map['employee_id'] ?? '',
+      employeeName: map['employee_name'] ?? '',
+      model: map['model'] ?? '',
+      serialNumber: map['serial_number'] ?? '',
     );
   }
 }

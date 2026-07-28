@@ -1,7 +1,9 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import '../services/database_helper.dart';
-import 'history_screen.dart';
+import 'package:ispace_asset_scanner/services/database_helper.dart';
+import 'package:ispace_asset_scanner/screens/add_asset_screen.dart';
 
 class ScannerScreen extends StatefulWidget {
   const ScannerScreen({super.key});
@@ -10,97 +12,180 @@ class ScannerScreen extends StatefulWidget {
   State<ScannerScreen> createState() => _ScannerScreenState();
 }
 
-class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProviderStateMixin {
-  final MobileScannerController controller = MobileScannerController();
-  bool isScanning = true;
-  int _selectedIndex = 0;
-  late AnimationController _animationController;
-  late Animation<double> _animation;
+class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserver {
+  late MobileScannerController controller;
+  bool _isProcessing = false;
 
   @override
   void initState() {
     super.initState();
-    _animationController = AnimationController(
-      duration: const Duration(seconds: 2),
-      vsync: this,
-    )..repeat(reverse: true);
-    _animation = Tween<double>(begin: 0, end: 1).animate(_animationController);
+    WidgetsBinding.instance.addObserver(this);
+    controller = MobileScannerController(
+      detectionSpeed: DetectionSpeed.noDuplicates,
+      facing: CameraFacing.back,
+      formats: [BarcodeFormat.all],
+      autoStart: true,
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!controller.value.isInitialized) return;
+    switch (state) {
+      case AppLifecycleState.resumed:
+        controller.start();
+        break;
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        controller.stop();
+        break;
+      default:
+        break;
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    controller.dispose();
+    super.dispose();
+  }
+
+  // Strictly parses for ID, Model, and Serial Number
+  Map<String, String> _parseHardwareOnly(String data) {
+    Map<String, String> result = {'id': '', 'model': '', 'serial': ''};
+    final String raw = data.trim();
+    bool identified = false;
+
+    // 1. Try JSON
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        result['id'] = (decoded['asset_id'] ?? decoded['id'] ?? '').toString().trim();
+        result['model'] = (decoded['model'] ?? '').toString().trim();
+        result['serial'] = (decoded['serial_number'] ?? decoded['serial'] ?? '').toString().trim();
+        if (result['id']!.isNotEmpty) identified = true;
+      }
+    } catch (_) {}
+
+    // 2. Intelligent Delimiter Split (Pipe, Semicolon, Newline, Tab, Comma)
+    if (!identified) {
+      final parts = raw.split(RegExp(r'[;\n|\t,]')).map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+      
+      for (var part in parts) {
+        if (part.contains(':')) {
+          final kv = part.split(':');
+          final k = kv[0].toLowerCase().trim();
+          final v = kv.sublist(1).join(':').trim();
+          if (k.contains('asset') || k == 'id') result['id'] = v;
+          else if (k.contains('model') || k == 'mod') result['model'] = v;
+          else if (k.contains('serial') || k == 'sn' || k == 's/n') result['serial'] = v;
+        }
+      }
+
+      // Positional fallback: ID, Model, Serial
+      if (result['id']!.isEmpty && parts.isNotEmpty) {
+        result['id'] = parts[0];
+        if (result['model']!.isEmpty && parts.length > 1) result['model'] = parts[1];
+        if (result['serial']!.isEmpty && parts.length > 2) result['serial'] = parts[2];
+      }
+    }
+
+    if (result['id']!.isEmpty) result['id'] = raw;
+    return result;
   }
 
   void _onDetect(BarcodeCapture capture) async {
-    if (!isScanning) return;
+    if (_isProcessing) return;
 
     final List<Barcode> barcodes = capture.barcodes;
     if (barcodes.isNotEmpty) {
-      final String? code = barcodes.first.rawValue;
-      if (code != null) {
-        setState(() {
-          isScanning = false;
-        });
-        
-        final assetData = await DatabaseHelper().getAssetDetails(code);
-        
-        String resultType = 'unknown';
-        if (assetData != null) {
-          resultType = assetData['is_company'] == 1 ? 'company' : 'not_company';
-        }
-
-        await DatabaseHelper().logScan(code, resultType, 'Security_Desk_1');
-        _showResult(assetData, code);
+      final String? rawCode = barcodes.first.rawValue ?? barcodes.first.displayValue;
+      if (rawCode != null && rawCode.isNotEmpty) {
+        HapticFeedback.lightImpact();
+        setState(() => _isProcessing = true);
+        await controller.stop();
+        if (!mounted) return;
+        _processScan(rawCode);
       }
     }
   }
 
-  void _showResult(Map<String, dynamic>? asset, String scannedCode) {
+  Future<void> _processScan(String rawData) async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const Center(child: CircularProgressIndicator(color: Colors.white)),
+    );
+
+    final hardware = _parseHardwareOnly(rawData);
+    final String searchId = hardware['id']!.isNotEmpty ? hardware['id']! : hardware['serial']!;
+
+    try {
+      final assetData = await DatabaseHelper().getAssetDetails(searchId);
+      if (!mounted) return;
+      Navigator.pop(context); 
+      _showResultSheet(assetData, rawData, hardware);
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.pop(context);
+      _resumeScanning();
+    }
+  }
+
+  void _resumeScanning() {
+    if (mounted) {
+      setState(() => _isProcessing = false);
+      controller.start();
+    }
+  }
+
+  void _showResultSheet(Map<String, dynamic>? asset, String rawData, Map<String, String> hardware) {
     showModalBottomSheet(
       context: context,
       isDismissible: false,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
       builder: (context) {
-        final bool isVerified = asset != null && asset['is_company'] == 1;
-
+        final bool isFound = asset != null;
         return Container(
-          padding: const EdgeInsets.all(24),
+          decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(30))),
+          padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                isVerified ? Icons.check_circle : Icons.error,
-                color: isVerified ? Colors.green : Colors.red,
-                size: 64,
-              ),
+              Container(width: 40, height: 4, margin: const EdgeInsets.only(bottom: 20), decoration: BoxDecoration(color: Colors.grey.withAlpha(50), borderRadius: BorderRadius.circular(2))),
+              Icon(isFound ? Icons.verified_user : Icons.new_label_outlined, color: isFound ? Colors.green : Colors.blue, size: 80),
               const SizedBox(height: 16),
-              Text(
-                isVerified ? 'Company Property' : 'Unknown Asset',
-                style: TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                  color: isVerified ? Colors.green : Colors.red,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text('Scanned Code: $scannedCode'),
-              if (isVerified) ...[
-                const Divider(height: 32),
-                _infoRow('Item Type', asset['asset_type'] ?? 'N/A'),
-                _infoRow('Employee', asset['emp_name'] ?? 'Unassigned'),
-                _infoRow('Dept', asset['department'] ?? 'N/A'),
-                _infoRow('Status', asset['status'] ?? 'N/A'),
+              Text(isFound ? 'OFFICE PROPERTY' : 'NEW HARDWARE DETECTED', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: isFound ? Colors.green : Colors.blue)),
+              const Divider(height: 40),
+              
+              if (isFound) ...[
+                _infoRow('Asset ID', asset['asset_id']),
+                _infoRow('Model', asset['model']),
+                _infoRow('Serial No', asset['serial_number']),
+                _infoRow('Assigned to', asset['employee_name']),
+              ] else ...[
+                _infoRow('ID', hardware['id']),
+                if (hardware['model']!.isNotEmpty) _infoRow('Model', hardware['model']),
+                if (hardware['serial']!.isNotEmpty) _infoRow('Serial', hardware['serial']),
+                const Padding(padding: EdgeInsets.symmetric(vertical: 12), child: Text('This item is not in the registry. Tap below to map these fields to a new registration.', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey, fontSize: 13))),
               ],
+
               const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: () {
-                    Navigator.pop(context);
-                    setState(() {
-                      isScanning = true;
-                    });
-                  },
-                  child: const Text('Scan Again'),
-                ),
+              ElevatedButton(
+                onPressed: () async {
+                  Navigator.pop(context);
+                  if (isFound) {
+                    _resumeScanning();
+                  } else {
+                    await Navigator.push(context, MaterialPageRoute(builder: (context) => AddAssetScreen(scannedId: rawData)));
+                    _resumeScanning();
+                  }
+                },
+                style: ElevatedButton.styleFrom(backgroundColor: isFound ? Colors.blue[900] : Colors.green[700], foregroundColor: Colors.white, minimumSize: const Size(double.infinity, 54), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                child: Text(isFound ? 'SCAN NEXT' : 'MAP & REGISTER'),
               ),
             ],
           ),
@@ -109,219 +194,23 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
     );
   }
 
-  Widget _infoRow(String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(label, style: const TextStyle(fontWeight: FontWeight.bold)),
-          Text(value),
-        ],
-      ),
-    );
-  }
+  Widget _infoRow(String label, dynamic value) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 6),
+    child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+      Text('$label:', style: const TextStyle(fontWeight: FontWeight.bold)),
+      Flexible(child: Text(value?.toString() ?? 'N/A', textAlign: TextAlign.right)),
+    ]),
+  );
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.white,
-      body: Stack(
-        children: [
-          MobileScanner(
-            controller: controller,
-            onDetect: _onDetect,
-          ),
-          _buildViewfinderOverlay(context),
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: Container(
-              padding: const EdgeInsets.only(top: 40, bottom: 10),
-              decoration: const BoxDecoration(
-                color: Colors.blue,
-              ),
-              child: Row(
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.arrow_back, color: Colors.white),
-                    onPressed: () => Navigator.pop(context),
-                  ),
-                  const Expanded(
-                    child: Center(
-                      child: Padding(
-                        padding: EdgeInsets.only(right: 48.0), // Fixed: used EdgeInsets.only
-                        child: Text(
-                          'QR & Barcode Scanner',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          Positioned(
-            top: 130,
-            left: 0,
-            right: 0,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                Container(
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.8),
-                    shape: BoxShape.circle,
-                  ),
-                  child: IconButton(
-                    icon: const Icon(Icons.flash_on, color: Colors.blue, size: 30),
-                    onPressed: () => controller.toggleTorch(),
-                  ),
-                ),
-                Container(
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.8),
-                    shape: BoxShape.circle,
-                  ),
-                  child: IconButton(
-                    icon: const Icon(Icons.flip_camera_ios, color: Colors.blue, size: 30),
-                    onPressed: () => controller.switchCamera(),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          _onDetect(BarcodeCapture(
-            barcodes: [
-              Barcode(
-                rawValue: 'LAP123',
-                format: BarcodeFormat.qrCode,
-              )
-            ],
-          ));
-        },
-        backgroundColor: Colors.blue,
-        tooltip: 'Simulate Scan',
-        child: const Icon(Icons.bug_report, color: Colors.white),
-      ),
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _selectedIndex,
-        type: BottomNavigationBarType.fixed,
-        selectedItemColor: Colors.blue,
-        unselectedItemColor: Colors.grey,
-        backgroundColor: Colors.white,
-        onTap: (index) {
-          if (index == 1) { // History Tab
-            Navigator.push(
-              context,
-              MaterialPageRoute(builder: (context) => const HistoryScreen()),
-            ).then((_) {
-               setState(() => _selectedIndex = 0);
-            });
-          } else {
-            setState(() {
-              _selectedIndex = index;
-            });
-          }
-        },
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.qr_code_scanner), label: 'Scanner'),
-          BottomNavigationBarItem(icon: Icon(Icons.history), label: 'History'),
-        ],
-      ),
+      backgroundColor: Colors.black,
+      appBar: AppBar(title: const Text('iSpace Asset Scanner'), backgroundColor: Colors.blue[900], foregroundColor: Colors.white),
+      body: Stack(children: [
+        MobileScanner(controller: controller, onDetect: _onDetect, fit: BoxFit.cover),
+        Center(child: Container(width: 250, height: 250, decoration: BoxDecoration(border: Border.all(color: Colors.blue.withAlpha(150), width: 2), borderRadius: BorderRadius.circular(20)))),
+      ]),
     );
   }
-
-  Widget _buildViewfinderOverlay(BuildContext context) {
-    double scanArea = 250.0;
-    return Align(
-      alignment: Alignment.center,
-      child: SizedBox(
-        height: scanArea,
-        width: scanArea,
-        child: AnimatedBuilder(
-          animation: _animation,
-          builder: (context, child) {
-            return CustomPaint(
-              painter: ScannerOverlayPainter(scanLinePosition: _animation.value),
-            );
-          },
-        ),
-      ),
-    );
-  }
-
-  @override
-  void dispose() {
-    controller.dispose();
-    _animationController.dispose();
-    super.dispose();
-  }
-}
-
-class ScannerOverlayPainter extends CustomPainter {
-  final double scanLinePosition;
-
-  ScannerOverlayPainter({required this.scanLinePosition});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.blue
-      ..strokeWidth = 6
-      ..strokeCap = StrokeCap.round
-      ..style = PaintingStyle.stroke;
-
-    final path = Path();
-    double cornerSize = 40.0;
-    double radius = 30.0;
-
-    path.moveTo(0, cornerSize);
-    path.lineTo(0, radius);
-    path.arcToPoint(Offset(radius, 0), radius: Radius.circular(radius));
-    path.lineTo(cornerSize, 0);
-
-    path.moveTo(size.width - cornerSize, 0);
-    path.lineTo(size.width - radius, 0);
-    path.arcToPoint(Offset(size.width, radius), radius: Radius.circular(radius));
-    path.lineTo(size.width, cornerSize);
-
-    path.moveTo(size.width, size.height - cornerSize);
-    path.lineTo(size.width, size.height - radius);
-    path.arcToPoint(Offset(size.width - radius, size.height), radius: Radius.circular(radius));
-    path.lineTo(size.width - cornerSize, size.height);
-
-    path.moveTo(cornerSize, size.height);
-    path.lineTo(radius, size.height);
-    path.arcToPoint(Offset(0, size.height - radius), radius: Radius.circular(radius));
-    path.lineTo(0, size.height - cornerSize);
-
-    canvas.drawPath(path, paint);
-
-    final linePaint = Paint()
-      ..color = Colors.blue.withOpacity(0.8)
-      ..strokeWidth = 3;
-
-    double y = size.height * scanLinePosition;
-    canvas.drawLine(Offset(20, y), Offset(size.width - 20, y), linePaint);
-    
-    final shadowPaint = Paint()
-      ..color = Colors.blue.withOpacity(0.3)
-      ..strokeWidth = 12;
-    canvas.drawLine(Offset(20, y), Offset(size.width - 20, y), shadowPaint);
-  }
-
-  @override
-  bool shouldRepaint(covariant ScannerOverlayPainter oldDelegate) => 
-      oldDelegate.scanLinePosition != scanLinePosition;
 }

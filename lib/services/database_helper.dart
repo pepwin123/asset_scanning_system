@@ -18,72 +18,52 @@ class DatabaseHelper {
     String path = join(await getDatabasesPath(), 'security_assets.db');
     return await openDatabase(
       path,
-      version: 1,
+      version: 6,
       onCreate: _onCreate,
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 6) {
+          await db.execute('DROP TABLE IF EXISTS assets');
+          await db.execute('DROP TABLE IF EXISTS scan_logs');
+          await db.execute('DROP TABLE IF EXISTS employees');
+          await _onCreate(db, newVersion);
+        }
+      },
     );
   }
 
   Future _onCreate(Database db, int version) async {
-    // 1. Employees Table
     await db.execute('''
-      CREATE TABLE employees(
-        emp_id TEXT PRIMARY KEY,
-        emp_name TEXT NOT NULL,
-        department TEXT,
-        status TEXT DEFAULT 'active'
-      )
-    ''');
-
-    // 2. Assets Table
-    await db.execute('''
-      CREATE TABLE assets(
-        asset_id TEXT PRIMARY KEY,
-        asset_type TEXT NOT NULL,
-        is_company INTEGER DEFAULT 1,
-        emp_id TEXT,
-        status TEXT DEFAULT 'active',
-        last_updated TEXT,
-        FOREIGN KEY (emp_id) REFERENCES employees (emp_id)
-      )
-    ''');
-
-    // 3. Scan Logs Table
-    await db.execute('''
-      CREATE TABLE scan_logs(
+      CREATE TABLE IF NOT EXISTS assets(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        asset_id TEXT,
-        scan_time TEXT,
-        result TEXT,
-        scanned_by TEXT
+        asset_id TEXT NOT NULL,
+        employee_id TEXT,
+        employee_name TEXT,
+        model TEXT,
+        serial_number TEXT
       )
     ''');
 
-    // Pre-populate some sample data for testing
-    await db.insert('employees', {
-      'emp_id': 'E001',
-      'emp_name': 'Mohana',
-      'department': 'Security',
-      'status': 'active'
-    });
-
-    await db.insert('assets', {
-      'asset_id': 'LAP123',
-      'asset_type': 'Laptop',
-      'is_company': 1,
-      'emp_id': 'E001',
-      'status': 'active',
-      'last_updated': DateTime.now().toIso8601String()
-    });
+    // Sample data
+    List<Map> existing = await db.query('assets', limit: 1);
+    if (existing.isEmpty) {
+      await db.insert('assets', {
+        'asset_id': 'LAP123',
+        'employee_id': 'E001',
+        'employee_name': 'Mohana',
+        'model': 'Dell XPS 15',
+        'serial_number': 'SN123456789'
+      });
+    }
   }
 
-  Future<Map<String, dynamic>?> getAssetDetails(String qrCode) async {
+  // Enhanced to search by both ID and Serial Number
+  Future<Map<String, dynamic>?> getAssetDetails(String identifier) async {
     Database db = await database;
-    List<Map<String, dynamic>> results = await db.rawQuery('''
-      SELECT a.*, e.emp_name, e.department 
-      FROM assets a
-      LEFT JOIN employees e ON a.emp_id = e.emp_id
-      WHERE a.asset_id = ?
-    ''', [qrCode]);
+    List<Map<String, dynamic>> results = await db.query(
+      'assets',
+      where: 'asset_id = ? OR serial_number = ?',
+      whereArgs: [identifier, identifier],
+    );
 
     if (results.isNotEmpty) {
       return results.first;
@@ -91,30 +71,22 @@ class DatabaseHelper {
     return null;
   }
 
-  Future<void> logScan(String assetId, String result, String scannedBy) async {
+  Future<List<Map<String, dynamic>>> getAllAssets() async {
     Database db = await database;
-    await db.insert('scan_logs', {
-      'asset_id': assetId,
-      'scan_time': DateTime.now().toIso8601String(),
-      'result': result,
-      'scanned_by': scannedBy
-    });
+    return await db.query('assets', orderBy: 'employee_name ASC');
   }
 
-  Future<List<Map<String, dynamic>>> getScanLogs() async {
+  Future<int> insertAsset(Map<String, dynamic> asset) async {
     Database db = await database;
-    // Query logs joined with asset and employee info for better history view
-    return await db.rawQuery('''
-      SELECT sl.*, a.asset_type, e.emp_name 
-      FROM scan_logs sl
-      LEFT JOIN assets a ON sl.asset_id = a.asset_id
-      LEFT JOIN employees e ON a.emp_id = e.emp_id
-      ORDER BY sl.scan_time DESC
-    ''');
+    return await db.insert(
+      'assets', 
+      asset,
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
   }
 
-  Future<void> clearLogs() async {
+  Future<void> deleteAsset(int id) async {
     Database db = await database;
-    await db.delete('scan_logs');
+    await db.delete('assets', where: 'id = ?', whereArgs: [id]);
   }
 }
